@@ -33,20 +33,43 @@ int task_one_way(void) {
     int fd[2];
     if (pipe(fd) == -1) { perror("pipe"); return 1; }
 
+    fflush(stdout);
     pid_t pid = fork();
-    if (pid < 0) { perror("fork"); return 1; }
+    if (pid < 0) { perror("fork"); close(fd[0]); close(fd[1]); return 1; }
 
     if (pid == 0) {
-        /* TODO: implement child logic (steps 1-4 above) */
-        (void)fd;
-        fprintf(stderr, "TODO: task_one_way child not implemented\n");
-        return 1;
+        close(fd[1]);
+
+        char buffer[64];
+        ssize_t n = read(fd[0], buffer, sizeof(buffer) - 1);
+        if (n < 0) {
+            perror("read");
+            close(fd[0]);
+            _exit(1);
+        }
+
+        buffer[n] = '\0';
+        printf("child received: %s\n", buffer);
+        fflush(stdout);
+        close(fd[0]);
+        _exit(0);
     }
 
-    /* TODO: implement parent logic (steps 1-5 above) */
-    (void)fd;
-    fprintf(stderr, "TODO: task_one_way parent not implemented\n");
-    return 1;
+    close(fd[0]);
+    const char message[] = "ping";
+    if (write(fd[1], message, sizeof(message) - 1) == -1) {
+        perror("write");
+        close(fd[1]);
+        waitpid(pid, NULL, 0);
+        return 1;
+    }
+    close(fd[1]);
+
+    int status;
+    if (waitpid(pid, &status, 0) == -1) { perror("waitpid"); return 1; }
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) return 1;
+    printf("parent: sent ping\n");
+    return 0;
 }
 
 /*
@@ -68,22 +91,72 @@ int task_one_way(void) {
  */
 int task_two_way(void) {
     int p2c[2], c2p[2];
-    if (pipe(p2c) == -1 || pipe(c2p) == -1) { perror("pipe"); return 1; }
-
-    pid_t pid = fork();
-    if (pid < 0) { perror("fork"); return 1; }
-
-    if (pid == 0) {
-        /* TODO: implement child logic */
-        (void)p2c; (void)c2p;
-        fprintf(stderr, "TODO: task_two_way child not implemented\n");
+    if (pipe(p2c) == -1) { perror("pipe"); return 1; }
+    if (pipe(c2p) == -1) {
+        perror("pipe");
+        close(p2c[0]); close(p2c[1]);
         return 1;
     }
 
-    /* TODO: implement parent logic */
-    (void)p2c; (void)c2p;
-    fprintf(stderr, "TODO: task_two_way parent not implemented\n");
-    return 1;
+    fflush(stdout);
+    pid_t pid = fork();
+    if (pid < 0) {
+        perror("fork");
+        close(p2c[0]); close(p2c[1]); close(c2p[0]); close(c2p[1]);
+        return 1;
+    }
+
+    if (pid == 0) {
+        close(p2c[1]);
+        close(c2p[0]);
+
+        int value;
+        ssize_t n = read(p2c[0], &value, sizeof(value));
+        close(p2c[0]);
+        if (n != (ssize_t)sizeof(value)) {
+            if (n < 0) perror("read");
+            close(c2p[1]);
+            _exit(1);
+        }
+
+        value *= 2;
+        printf("child computed: %d\n", value);
+        fflush(stdout);
+        if (write(c2p[1], &value, sizeof(value)) != (ssize_t)sizeof(value)) {
+            perror("write");
+            close(c2p[1]);
+            _exit(1);
+        }
+        close(c2p[1]);
+        _exit(0);
+    }
+
+    close(p2c[0]);
+    close(c2p[1]);
+
+    int value = 21;
+    if (write(p2c[1], &value, sizeof(value)) != (ssize_t)sizeof(value)) {
+        perror("write");
+        close(p2c[1]); close(c2p[0]);
+        waitpid(pid, NULL, 0);
+        return 1;
+    }
+    close(p2c[1]);
+
+    int result;
+    ssize_t n = read(c2p[0], &result, sizeof(result));
+    close(c2p[0]);
+    if (n != (ssize_t)sizeof(result)) {
+        if (n < 0) perror("read");
+        waitpid(pid, NULL, 0);
+        return 1;
+    }
+
+    int status;
+    if (waitpid(pid, &status, 0) == -1) { perror("waitpid"); return 1; }
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) return 1;
+    printf("parent received: %d\n", result);
+    return 0;
 }
 
 /*
@@ -104,21 +177,51 @@ int task_eof(void) {
     int fd[2];
     if (pipe(fd) == -1) { perror("pipe"); return 1; }
 
+    fflush(stdout);
     pid_t pid = fork();
-    if (pid < 0) { perror("fork"); return 1; }
-
-    if (pid == 0) {
-        /* TODO: close fd[1], read in a loop until read() == 0,
-                 print "child: got EOF after <n> bytes", close fd[0] */
-        (void)fd;
-        fprintf(stderr, "TODO: task_eof child not implemented\n");
+    if (pid < 0) {
+        perror("fork");
+        close(fd[0]); close(fd[1]);
         return 1;
     }
 
-    /* TODO: close fd[0], write "hello", close fd[1], waitpid */
-    (void)fd;
-    fprintf(stderr, "TODO: task_eof parent not implemented\n");
-    return 1;
+    if (pid == 0) {
+        close(fd[1]);
+
+        char buffer[64];
+        size_t total = 0;
+        for (;;) {
+            ssize_t n = read(fd[0], buffer, sizeof(buffer));
+            if (n == 0) break;
+            if (n < 0) {
+                if (errno == EINTR) continue;
+                perror("read");
+                close(fd[0]);
+                _exit(1);
+            }
+            total += (size_t)n;
+        }
+
+        close(fd[0]);
+        printf("child: got EOF after %zu bytes\n", total);
+        fflush(stdout);
+        _exit(0);
+    }
+
+    close(fd[0]);
+    const char message[] = "hello";
+    if (write(fd[1], message, sizeof(message) - 1) != (ssize_t)(sizeof(message) - 1)) {
+        perror("write");
+        close(fd[1]);
+        waitpid(pid, NULL, 0);
+        return 1;
+    }
+    close(fd[1]);
+
+    int status;
+    if (waitpid(pid, &status, 0) == -1) { perror("waitpid"); return 1; }
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) return 1;
+    return 0;
 }
 
 /*
@@ -145,22 +248,73 @@ int task_eof(void) {
 int task_broken_pipe(void) {
     int data_fd[2];
     int sync_fd[2];
-    if (pipe(data_fd) == -1 || pipe(sync_fd) == -1) { perror("pipe"); return 1; }
-
-    pid_t pid = fork();
-    if (pid < 0) { perror("fork"); return 1; }
-
-    if (pid == 0) {
-        /* TODO: implement child logic (see description above) */
-        (void)data_fd; (void)sync_fd;
-        fprintf(stderr, "TODO: task_broken_pipe child not implemented\n");
+    if (pipe(data_fd) == -1) { perror("pipe"); return 1; }
+    if (pipe(sync_fd) == -1) {
+        perror("pipe");
+        close(data_fd[0]); close(data_fd[1]);
         return 1;
     }
 
-    /* TODO: implement parent logic (see description above) */
-    (void)data_fd; (void)sync_fd;
-    fprintf(stderr, "TODO: task_broken_pipe parent not implemented\n");
-    return 1;
+    fflush(stdout);
+    pid_t pid = fork();
+    if (pid < 0) {
+        perror("fork");
+        close(data_fd[0]); close(data_fd[1]);
+        close(sync_fd[0]); close(sync_fd[1]);
+        return 1;
+    }
+
+    if (pid == 0) {
+        close(data_fd[0]);
+        close(data_fd[1]);
+        close(sync_fd[0]);
+
+        const char ack = 'A';
+        if (write(sync_fd[1], &ack, 1) != 1) {
+            perror("write");
+            close(sync_fd[1]);
+            _exit(1);
+        }
+        close(sync_fd[1]);
+        _exit(0);
+    }
+
+    close(sync_fd[1]);
+    char ack;
+    ssize_t n = read(sync_fd[0], &ack, 1);
+    close(sync_fd[0]);
+    close(data_fd[0]);
+    if (n != 1) {
+        if (n < 0) perror("read");
+        close(data_fd[1]);
+        waitpid(pid, NULL, 0);
+        return 1;
+    }
+
+    if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) {
+        perror("signal");
+        close(data_fd[1]);
+        waitpid(pid, NULL, 0);
+        return 1;
+    }
+
+    const char byte = 'X';
+    errno = 0;
+    ssize_t written = write(data_fd[1], &byte, 1);
+    int broken_pipe = (written == -1 && errno == EPIPE);
+    close(data_fd[1]);
+
+    int status;
+    if (waitpid(pid, &status, 0) == -1) { perror("waitpid"); return 1; }
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) return 1;
+    if (!broken_pipe) {
+        if (written == -1) perror("write");
+        else fprintf(stderr, "write unexpectedly succeeded\n");
+        return 1;
+    }
+
+    printf("parent: broken pipe detected\n");
+    return 0;
 }
 
 /* ------------------------------------------------------------------ */
